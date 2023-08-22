@@ -1,0 +1,24 @@
+This script is a tool to bind multiple Nifti images into a single image by resampling each image to a common image space, as might be necessary for multi-region or whole-body imaging. Overlapping regions are averaged together.
+Alan McMillan 2023 (abmcmillan@wisc.edu) 
+
+Inputs:
+    --input: The input images to combine.
+    --output: The output image.
+    --as_float: Convert the images to float before combining.
+    --interp_type: Interpolation type to use. Default is linear.
+    --voxel_size: The voxel size of the output image (three floating point inputs). Default is to infer from the first input.
+
+Outputs:
+    The output image.
+
+Example usage:
+    python BindNiftiImages.py --input image1.nii.gz image2.nii.gz --output bound_image.nii.gz
+
+Notes:
+    The current implementation is simple and may not handle oblique images well. Additionally, better strategies for
+    merging overlapping regions should be investigated.
+
+Requirements:
+    - antspy
+    - numpy
+    - Python 3.6 or higher
