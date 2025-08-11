@@ -2,14 +2,15 @@ import ants
 import argparse
 import numpy as np
 from pathlib import Path
+import SimpleITK as sitk
 
 """
-This script is a tool to bind multiple Nifti images into a single image by resampling each image to a common image space,
+This script is a tool to bind multiple Nifti or DICOM images into a single image by resampling each image to a common image space,
 as might be necessary for multi-region or whole-body imaging. Overlapping regions are averaged together.
 Alan McMillan 2023 (abmcmillan@wisc.edu) 
 
 Inputs:
-    --input: The input images to combine.
+    --input: The input images/directories to combine.
     --output: The output image.
     --as_float: Convert the images to float before combining.
     --interp_type: Interpolation type to use. Default is linear.
@@ -20,6 +21,7 @@ Outputs:
 
 Example usage:
     python BindNiftiImages.py --input image1.nii.gz image2.nii.gz --output bound_image.nii.gz
+    python BindNiftiImages.py --input dicom_dir1 dicom_dir2 --output bound_image.nii.gz
 
 Notes:
     The current implementation is simple and may not handle oblique images well. Additionally, better strategies for
@@ -28,8 +30,34 @@ Notes:
 Requirements:
     - antspy
     - numpy
+    - SimpleITK
     - Python 3.6 or higher
 """
+
+def read_dicom_series(directory, pixeltype='float'):
+    """
+    Reads a DICOM series from a directory and returns an antspy image.
+    """
+    reader = sitk.ImageSeriesReader()
+    dicom_names = reader.GetGDCMSeriesFileNames(str(directory))
+    reader.SetFileNames(dicom_names)
+    image_sitk = reader.Execute()
+
+    # Convert SimpleITK image to numpy array
+    image_np = sitk.GetArrayFromImage(image_sitk)
+
+    # Get metadata from SimpleITK image
+    spacing = image_sitk.GetSpacing()
+    origin = image_sitk.GetOrigin()
+    direction_sitk = image_sitk.GetDirection()
+
+    # Convert direction matrix to numpy array
+    direction_np = np.array(direction_sitk).reshape(len(spacing), len(spacing))
+
+    # Create antspy image from numpy array and metadata
+    image_ants = ants.from_numpy(image_np.astype(pixeltype), origin=origin, spacing=spacing, direction=direction_np)
+
+    return image_ants
 
 # 
 # 
@@ -49,8 +77,9 @@ args = parser.parse_args()
 
 # Check that the input files exist
 for fp in args.input:
-    if not Path(fp).is_file():
-        raise Exception(f'Input file {fp} does not exist.')
+    path = Path(fp)
+    if not (path.is_file() or path.is_dir()):
+        raise Exception(f'Input {fp} is not a file or directory.')
     
 # Check that the output file does not exist
 if Path(args.output).is_file():
@@ -63,8 +92,16 @@ if args.as_float:
     pixeltype = 'float'
 else:
     pixeltype = None
-# now load
-images = [ants.image_read(fp,pixeltype=pixeltype) for fp in args.input]
+
+images = []
+for fp in args.input:
+    path = Path(fp)
+    if path.is_dir():
+        print(f"Reading DICOM series from directory: {fp}")
+        images.append(read_dicom_series(fp, pixeltype=pixeltype))
+    else:
+        print(f"Reading Nifti file: {fp}")
+        images.append(ants.image_read(fp, pixeltype=pixeltype))
 
 
 # print some information about the images
