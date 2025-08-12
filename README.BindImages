@@ -20,7 +20,6 @@ Notes:
     merging overlapping regions should be investigated.
 
 Requirements:
-    - antspy
-    - numpy
     - SimpleITK
+    - numpy
     - Python 3.6 or higher

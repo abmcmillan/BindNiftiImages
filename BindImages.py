@@ -1,13 +1,13 @@
-import ants
+import SimpleITK as sitk
 import argparse
 import numpy as np
 from pathlib import Path
-import SimpleITK as sitk
 
 """
 This script is a tool to bind multiple Nifti or DICOM images into a single image by resampling each image to a common image space,
 as might be necessary for multi-region or whole-body imaging. Overlapping regions are averaged together.
-Alan McMillan 2023 (abmcmillan@wisc.edu) 
+This version uses SimpleITK for all image processing operations.
+Alan McMillan 2023 (abmcmillan@wisc.edu) - Rewritten by Jules 2025
 
 Inputs:
     --input: The input images/directories to combine.
@@ -20,188 +20,162 @@ Outputs:
     The output image.
 
 Example usage:
-    python BindNiftiImages.py --input image1.nii.gz image2.nii.gz --output bound_image.nii.gz
-    python BindNiftiImages.py --input dicom_dir1 dicom_dir2 --output bound_image.nii.gz
-
-Notes:
-    The current implementation is simple and may not handle oblique images well. Additionally, better strategies for
-    merging overlapping regions should be investigated.
+    python BindImages.py --input image1.nii.gz image2.nii.gz --output bound_image.nii.gz
+    python BindImages.py --input dicom_dir1 dicom_dir2 --output bound_image.nii.gz
 
 Requirements:
-    - antspy
-    - numpy
     - SimpleITK
+    - numpy
     - Python 3.6 or higher
 """
 
-def read_dicom_series(directory, pixeltype='float'):
+# Mapping from string arguments to SimpleITK interpolator constants
+interpolator_map = {
+    'linear': sitk.sitkLinear,
+    'nearestNeighbor': sitk.sitkNearestNeighbor,
+    'gaussian': sitk.sitkGaussian,
+    'bSpline': sitk.sitkBSpline,
+    'cosineWindowedSinc': sitk.sitkCosineWindowedSinc,
+    'hammingWindowedSinc': sitk.sitkHammingWindowedSinc,
+    'lanczosWindowedSinc': sitk.sitkLanczosWindowedSinc,
+    'genericLabel': sitk.sitkLabelGaussian,
+}
+
+def read_dicom_series(directory):
     """
-    Reads a DICOM series from a directory and returns an antspy image.
+    Reads a DICOM series from a directory and returns a SimpleITK image.
     """
     reader = sitk.ImageSeriesReader()
     dicom_names = reader.GetGDCMSeriesFileNames(str(directory))
+    if not dicom_names:
+        raise ValueError(f"No DICOM series found in directory: {directory}")
     reader.SetFileNames(dicom_names)
     image_sitk = reader.Execute()
-
-    # Convert SimpleITK image to numpy array
-    image_np = sitk.GetArrayFromImage(image_sitk)
-
-    # Get metadata from SimpleITK image
-    spacing = image_sitk.GetSpacing()
-    origin = image_sitk.GetOrigin()
-    direction_sitk = image_sitk.GetDirection()
-
-    # Convert direction matrix to numpy array
-    direction_np = np.array(direction_sitk).reshape(len(spacing), len(spacing))
-
-    # Create antspy image from numpy array and metadata
-    image_ants = ants.from_numpy(image_np.astype(pixeltype), origin=origin, spacing=spacing, direction=direction_np)
-
-    return image_ants
-
-# 
-# 
-# The images are combined by resampling each image to a common image space.
+    return image_sitk
 
 # Step 0: Parse the command line arguments
-parser = argparse.ArgumentParser(description='Combine multiple Nifti images into a single image.')
-parser.add_argument('--input', type=str, nargs='+', help='The input images to combine.', required=True)
-parser.add_argument('--output', type=str, help='The output image.', required=True)
-parser.add_argument('--as_float', action='store_true', help='Convert the images to float before combining.')
+parser = argparse.ArgumentParser(description='Combine multiple Nifti or DICOM images into a single image using SimpleITK.')
+parser.add_argument('--input', type=str, nargs='+', help='The input images or DICOM directories to combine.', required=True)
+parser.add_argument('--output', type=str, help='The output image file.', required=True)
+parser.add_argument('--as_float', action='store_true', help='Convert the images to float32 before combining.')
 parser.add_argument('--interp_type',
-                    choices=['linear', 'nearestNeighbor', 'gaussian', 'bSpline', 'cosineWindowedSinc', 'welchWindowedSinc',
-                             'hammingWindowedSinc', 'lanczosWindowedSinc', 'genericLabel'],
-                    default='linear', help="Interpolation type to use.")
+                    choices=list(interpolator_map.keys()),
+                    default='linear', help="Interpolation type to use for resampling.")
 parser.add_argument('--voxel_size', type=float, nargs=3, help='The voxel size of the output image (three floating point inputs).', required=False)
 args = parser.parse_args()
 
-# Check that the input files exist
+# Check that the input files/directories exist
 for fp in args.input:
     path = Path(fp)
     if not (path.is_file() or path.is_dir()):
-        raise Exception(f'Input {fp} is not a file or directory.')
-    
+        raise Exception(f'Input {fp} is not a valid file or directory.')
+
 # Check that the output file does not exist
 if Path(args.output).is_file():
     raise Exception(f'Output file {args.output} already exists.')
 
 # Step 1: Load the images
-#  Note: we optionally convert the images to float on read
 print('loading images...')
-if args.as_float:
-    pixeltype = 'float'
-else:
-    pixeltype = None
-
 images = []
 for fp in args.input:
     path = Path(fp)
     if path.is_dir():
         print(f"Reading DICOM series from directory: {fp}")
-        images.append(read_dicom_series(fp, pixeltype=pixeltype))
+        images.append(read_dicom_series(fp))
     else:
-        print(f"Reading Nifti file: {fp}")
-        images.append(ants.image_read(fp, pixeltype=pixeltype))
-
-
-# print some information about the images
-real_world_coords = []
-for i, img in enumerate(images):
-    print( f'file: {args.input[i]}')
-    print( f'    shape: {img.shape}' )
-    print( f'    spacing: {img.spacing}' )
-    print( f'    origin: {img.origin}' )
-
-    # Get the orientation (direction), origin, and spacing
-    direction = img.direction
-    origin = img.origin
-    spacing = img.spacing
-
-    # Initialize a 4x4 matrix with the voxel sizes on the diagonal
-    sform = np.eye(4)
-    for i in range(3):
-        sform[i, i] = spacing[i]
-
-    # Apply the rotation
-    sform[0:3, 0:3] = np.dot(sform[0:3, 0:3], np.array(direction).reshape(3,3))
-
-    # Set the translation
-    sform[0:3, 3] = origin
-
-    # Multiply by the transformation matrix to get the real-world coordinates
-    first_voxel = np.array([0, 0, 0, 1])
-    last_voxel = np.array([img.shape[0]-1, img.shape[1]-1, img.shape[2]-1, 1])
-    
-    first_voxel_real_world = np.dot(sform, first_voxel)[0:3]
-    last_voxel_real_world = np.dot(sform, last_voxel)[0:3]
-    
-    print( f'    [   0,   0,   0] in mm: {first_voxel_real_world}' )
-    print( f'    [maxX,maxY,maxZ] in mm: {last_voxel_real_world}' )
-
-    real_world_coords.append( first_voxel_real_world )
-    real_world_coords.append( last_voxel_real_world )
+        print(f"Reading image file: {fp}")
+        images.append(sitk.ReadImage(str(fp)))
 
 # Step 2: Determine the spatial extent in world space coordinates
 print('computing spatial extents...')
-min_coords = np.min( real_world_coords, axis=0 )
-max_coords = np.max( real_world_coords, axis=0 )
+real_world_coords = []
+for i, img in enumerate(images):
+    print(f'file: {args.input[i]}')
+    size = img.GetSize()
+    print(f'    shape: {size}')
+    print(f'    spacing: {img.GetSpacing()}')
+    print(f'    origin: {img.GetOrigin()}')
+
+    # Get the 8 corners of the image in pixel coordinates
+    corners_index = []
+    for x in [0, size[0]-1]:
+        for y in [0, size[1]-1]:
+            for z in [0, size[2]-1]:
+                corners_index.append((x,y,z))
+
+    # Transform corner indices to physical points
+    physical_corners = [img.TransformIndexToPhysicalPoint(c) for c in corners_index]
+    real_world_coords.extend(physical_corners)
+
+min_coords = np.min(real_world_coords, axis=0)
+max_coords = np.max(real_world_coords, axis=0)
 extent_range = max_coords - min_coords
 
-print( f'    min_extent: {min_coords}' )
-print( f'    max_extent: {max_coords}' )
-print( f'    extent_range: {extent_range}')
+print(f'    min_extent: {min_coords}')
+print(f'    max_extent: {max_coords}')
+print(f'    extent_range: {extent_range}')
 
-# Determine the voxel size of the new image
+# Step 3: Define the geometry of the output image
 if args.voxel_size is None:
-    # infer the voxel size from the first input
-    newimg_spacing = images[0].spacing
-    newimg_spacing = tuple( value/2 for value in newimg_spacing ) # cut the pixel size in half
-    print( f'    new image spacing (inferred from first input): {newimg_spacing}' )
+    newimg_spacing = images[0].GetSpacing()
+    newimg_spacing = tuple(value / 2 for value in newimg_spacing)
+    print(f'    new image spacing (inferred from first input, halved): {newimg_spacing}')
 else:
-    # use the voxel size provided by the user
-    newimg_spacing = tuple( args.voxel_size )
-# Compute size of the new image, and make sure to round up to ensure all images fit
-newimg_size = tuple( np.ceil(extent_range / newimg_spacing).astype(int) )
-# determine the origin of the new image from extent_range and sform
-# TODO - consider better strategies for the output origin and direction, there might be troubles with oblique images
-newimg_origin = tuple( min_coords ) # use the minimum coordinates as the origin
-# determine the direction of the new image
-#newimg_direction = images[0].direction
-newimg_direction = np.eye(3) # use identity matrix as the direction
-# determine the pixeltype of the new image
-newimg_pixeltype = images[0].pixeltype # note that if the as_float parameter was passed, the images are already float
+    newimg_spacing = tuple(args.voxel_size)
 
-# Step 3: Create new empty matrix
-print('creating new image...')
-newimg = ants.make_image( imagesize=newimg_size, spacing=newimg_spacing, origin=newimg_origin, direction=newimg_direction, pixeltype=newimg_pixeltype )
+newimg_size = [int(np.ceil(extent_range[i] / newimg_spacing[i])) for i in range(3)]
+newimg_origin = tuple(min_coords)
+newimg_direction = np.eye(3).flatten().tolist()
+output_pixel_type = sitk.sitkFloat32 if args.as_float else images[0].GetPixelID()
 
-print( 'bound image' )
-print( f'    shape: {newimg.shape}' )
-print( f'    spacing: {newimg.spacing}' )
-print( f'    origin: {newimg.origin}' )
-print( f'    min_extent: {newimg_origin}' )
-print( f'    max_extent: {newimg.origin + newimg.spacing * np.array(newimg.shape)}' )
-print( f'    pixeltype: {newimg_pixeltype}' )
+# Step 4: Create the output image and resample inputs
+print('creating new image and binding...')
+resampler = sitk.ResampleImageFilter()
+resampler.SetOutputSpacing(newimg_spacing)
+resampler.SetOutputOrigin(newimg_origin)
+resampler.SetOutputDirection(newimg_direction)
+resampler.SetSize(newimg_size)
+resampler.SetInterpolator(interpolator_map[args.interp_type])
+resampler.SetDefaultPixelValue(0)
 
-print('binding images...')
-# Step 4: Resample each image to the new image
-# create an image to keep track of the overlap
-overlap_img = ants.image_clone( newimg )
-# loop through each image and resample it to the new image
-# TODO - consider better strategies for combining images verses simple averaging
-for i, img in enumerate(images):
-    # calculate overlap by resampling a binary image
-    curr_overlap_img = ants.make_image( imagesize=img.shape, voxval=1, spacing=img.spacing, origin=img.origin, direction=img.direction, pixeltype=img.pixeltype )
-    transformed_overlap_img = ants.resample_image_to_target( image=curr_overlap_img, target=newimg, interp_type=args.interp_type )
-    overlap_img += transformed_overlap_img
-    
-    transformed_img = ants.resample_image_to_target( image=img, target=newimg, interp_type=args.interp_type )
-    newimg += transformed_img
+# Accumulator for the resampled images and the overlap count
+final_image_accumulator = sitk.Image(newimg_size, sitk.sitkFloat32)
+final_image_accumulator.SetSpacing(newimg_spacing)
+final_image_accumulator.SetOrigin(newimg_origin)
+final_image_accumulator.SetDirection(newimg_direction)
 
-# Step 5: Intensity correct the overlapping regions
-newimg /= overlap_img
+overlap_accumulator = sitk.Image(newimg_size, sitk.sitkFloat32)
+overlap_accumulator.CopyInformation(final_image_accumulator)
+
+for img in images:
+    # Resample image
+    resampler.SetOutputPixelType(sitk.sitkFloat32)
+    resampled_img = resampler.Execute(img)
+    final_image_accumulator += resampled_img
+
+    # Create a binary mask for overlap counting
+    binary_mask = sitk.Image(img.GetSize(), sitk.sitkFloat32)
+    binary_mask.CopyInformation(img)
+    binary_mask += 1.0 # Fill with 1s
+
+    # Resample mask
+    resampler.SetInterpolator(sitk.sitkNearestNeighbor) # Use nearest neighbor for mask
+    resampled_mask = resampler.Execute(binary_mask)
+    overlap_accumulator += resampled_mask
+
+# Step 5: Average the overlapping regions
+# Avoid division by zero where there is no overlap
+overlap_accumulator = sitk.Maximum(overlap_accumulator, 1.0)
+final_image = final_image_accumulator / overlap_accumulator
+
+# Cast to original pixel type if not --as_float
+if not args.as_float:
+    # Get the pixel ID from the first input image to determine the output type
+    original_pixel_id = images[0].GetPixelID()
+    final_image = sitk.Cast(final_image, original_pixel_id)
 
 # Step 6: Save the combined image
-ants.image_write(newimg, str(args.output) )
+print('saving combined image...')
+sitk.WriteImage(final_image, str(args.output))
 print('complete...')
-print( f'    Output file: {args.output}' )
+print(f'    Output file: {args.output}')
